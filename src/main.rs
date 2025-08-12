@@ -4,6 +4,7 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::num::ParseIntError;
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::{fs, str};
 use thiserror::Error;
@@ -24,20 +25,25 @@ pub enum ProgramError {
     CaptureError,
     #[error("regex error: {0}")]
     RegexError(#[from] regex::Error),
+    #[error("Couldn't find any files to rename.")]
+    EmptyError,
 }
 
 type ProgramResult<T> = Result<T, ProgramError>;
 fn rename_mkv(params: Args) -> ProgramResult<()> {
     // Create list of files.
     let mut videofiles = Vec::with_capacity(12);
-    let re_vid = Regex::new(r"^.+?\.mkv$")?;
+    let re = Regex::new(r"^(?<name>.+?)(?:\s+Disc\s+\d+)?_t(?<num>\d{2})\.mkv$")?;
     for file in fs::read_dir(params.dir.as_ref())? {
-        let f: Arc<str> = file?.file_name().to_string_lossy().into();
-        if re_vid.is_match(f.as_ref()) {
+        let f: Rc<str> = file?.file_name().to_string_lossy().into();
+        if re.is_match(f.as_ref()) {
             videofiles.push(f);
         }
     }
-    videofiles.sort();
+
+    if videofiles.is_empty() {
+        return Err(ProgramError::EmptyError);
+    }
 
     let quality_map = HashMap::from([
         ("bd", "[BD Remux][1080p]"),
@@ -51,29 +57,26 @@ fn rename_mkv(params: Args) -> ProgramResult<()> {
 
     // Renaming logic
     let mut newnames = Vec::with_capacity(12);
-    let re = Regex::new(r"^(?<name>.+?)(?:\s+Disc\s+\d+)?_t(?<num>\d{2})\.mkv$")?;
+    let mut episode_num: u32 = params.number;
     for videofile in videofiles.iter() {
         let caps = re
             .captures(videofile.as_ref())
             .ok_or(ProgramError::CaptureError)?;
-        let (_, [name, raw_num]) = caps.extract();
-        let episode_num: u32 = raw_num.parse()?;
+        let (_, [name, _]) = caps.extract();
         let newname = format!(
             "{} S{:02}E{:02} {}.mkv",
-            name,
-            params.season,
-            episode_num + params.number,
-            quality
+            name, params.season, episode_num, quality
         );
+        episode_num += 1;
         newnames.push(newname);
     }
 
     // Check
-    println!("Joining sub files to these video files.");
+    println!("Renaming file to the following:");
     let file_iter = newnames.iter().zip(videofiles.iter());
 
     for (sub, vid) in file_iter.clone() {
-        println!("{}\t{}", sub, vid);
+        println!("{}\t-->\t{}", sub, vid);
     }
 
     // User confirmation
@@ -107,7 +110,7 @@ struct Args {
     #[arg(short, long)]
     quality: Arc<str>,
     /// season
-    #[arg(short, long)]
+    #[arg(short, long, default_value = "1")]
     season: u32,
     /// starting episode number
     #[arg(short, long, default_value = "1")]
